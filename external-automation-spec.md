@@ -382,9 +382,3 @@ Validation runs after implementation, against THIS spec:
 - Admin auth guard `admin` — already protects all `/admin/*` routes; reuse for admin UI pages
 - View-render events `bagisto.admin.catalog.products.edit.*` — to inject the mappings tab into the product edit page without editing core
 
-## Design References (deferred — not part of this spec)
-
-- `~/bagisto-store/DESIGN.md` — Shopify-inspired design system (cinematic black + cream-mint two-canvas, NHGD thin-weight display, pill-only buttons, aloe/pistachio accents). **Status**: vision doc for future marketing/landing pages, NOT the MVP storefront theme.
-- **Why deferred**: it's a SaaS-marketing design (shopify.com style), not an ecommerce-storefront design; collides with the RTL/Urdu requirement (NHGD has no Nastaliq); the proprietary font license is incompatible with the 2-day MVP budget.
-- **What we will borrow (cheap wins, post-MVP)**: pill-button shape (`{rounded.pill}`), aloe-green featured-CTA accent. These layer in via Tailwind config overrides without changing markup.
-- **What we will NOT do in v1**: replace Bagisto's default Shop theme, swap fonts to NHGD, restructure layout to the two-canvas system.
