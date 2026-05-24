@@ -29,6 +29,7 @@ class PendingProductUpdate extends Model implements PendingProductUpdateContract
     protected $fillable = [
         'product_id',
         'submitted_by_token_id',
+        'external_request_id',
         'source_url',
         'proposed_price',
         'proposed_stock',

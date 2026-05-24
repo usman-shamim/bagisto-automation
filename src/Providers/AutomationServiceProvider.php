@@ -41,5 +41,6 @@ class AutomationServiceProvider extends ServiceProvider
         $this->app->register(EventServiceProvider::class);
 
         $this->mergeConfigFrom(__DIR__.'/../Config/menu.php', 'menu.admin');
+        $this->mergeConfigFrom(__DIR__.'/../Config/acl.php', 'acl');
     }
 }

@@ -171,3 +171,108 @@ it('returns 404 when posting against an unknown product', function () {
         ])->assertStatus(404)
         ->assertJson(['error' => ['code' => 'not_found']]);
 });
+
+it('returns the original row with 200 when the same external_request_id is replayed', function () {
+    $bearer = pendingUpdatesBearer(['write:staged']);
+    $productId = aProductId();
+
+    $payload = [
+        'product_id' => $productId,
+        'source_url' => 'https://daraz.pk/idempotent',
+        'proposed_price' => 1234.50,
+        'external_request_id' => 'agent-run-2026-05-24-abc123',
+    ];
+
+    $first = $this->withHeader('Authorization', "Bearer {$bearer}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    $firstId = $first->json('data.id');
+    expect($firstId)->not->toBeNull();
+
+    // Replay the exact same request with the same bearer + external_request_id.
+    $second = $this->withHeader('Authorization', "Bearer {$bearer}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(200);
+
+    expect($second->json('data.id'))->toBe($firstId)
+        ->and($second->json('data.external_request_id'))->toBe('agent-run-2026-05-24-abc123');
+
+    // The DB should contain exactly one row for this (token, external_request_id) pair.
+    $count = PendingProductUpdateProxy::modelClass()::query()
+        ->where('external_request_id', 'agent-run-2026-05-24-abc123')
+        ->count();
+    expect($count)->toBe(1);
+});
+
+it('treats the same external_request_id from a different token as a separate request', function () {
+    $bearerA = pendingUpdatesBearer(['write:staged']);
+    $bearerB = pendingUpdatesBearer(['write:staged']);
+    $productId = aProductId();
+
+    $payload = [
+        'product_id' => $productId,
+        'source_url' => 'https://daraz.pk/cross-token',
+        'proposed_price' => 50.0,
+        'external_request_id' => 'shared-id-001',
+    ];
+
+    $first = $this->withHeader('Authorization', "Bearer {$bearerA}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    $second = $this->withHeader('Authorization', "Bearer {$bearerB}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    expect($first->json('data.id'))->not->toBe($second->json('data.id'));
+});
+
+it('allows multiple submissions without an external_request_id', function () {
+    $bearer = pendingUpdatesBearer(['write:staged']);
+    $productId = aProductId();
+
+    $payload = [
+        'product_id' => $productId,
+        'source_url' => 'https://daraz.pk/no-idempotency-key',
+        'proposed_price' => 75.0,
+    ];
+
+    $first = $this->withHeader('Authorization', "Bearer {$bearer}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    $second = $this->withHeader('Authorization', "Bearer {$bearer}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    // No idempotency key → two distinct rows.
+    expect($first->json('data.id'))->not->toBe($second->json('data.id'));
+});
+
+it('treats an empty external_request_id as no idempotency key', function () {
+    $bearer = pendingUpdatesBearer(['write:staged']);
+    $productId = aProductId();
+
+    $payload = [
+        'product_id' => $productId,
+        'source_url' => 'https://daraz.pk/empty-key',
+        'proposed_price' => 25.0,
+        'external_request_id' => '',
+    ];
+
+    $first = $this->withHeader('Authorization', "Bearer {$bearer}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    // Empty string must NOT be treated as a real idempotency key — otherwise
+    // a second "" submission from the same token would collide on the
+    // (token, external_request_id) unique index.
+    $second = $this->withHeader('Authorization', "Bearer {$bearer}")
+        ->postJson('/api/automation/v1/pending-updates', $payload)
+        ->assertStatus(201);
+
+    expect($first->json('data.id'))->not->toBe($second->json('data.id'))
+        ->and($first->json('data.external_request_id'))->toBeNull()
+        ->and($second->json('data.external_request_id'))->toBeNull();
+});

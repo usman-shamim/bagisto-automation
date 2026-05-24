@@ -45,6 +45,22 @@ it('dispatches one job per active matching webhook when the listener fires', fun
     Bus::assertDispatched(DispatchWebhook::class, fn ($j) => $j->webhookId === $w2->id);
 });
 
+it('builds product.updated payloads stamped with the schema version and event name', function () {
+    Bus::fake([DispatchWebhook::class]);
+
+    makeWebhookForDispatch();
+
+    (new DispatchWebhooksForProductUpdate)->handle(aProduct());
+
+    Bus::assertDispatched(DispatchWebhook::class, function ($job) {
+        return ($job->payload['version'] ?? null) === 'v1'
+            && ($job->payload['event'] ?? null) === 'product.updated'
+            && array_key_exists('product_id', $job->payload)
+            && array_key_exists('stock_total', $job->payload)
+            && array_key_exists('occurred_at', $job->payload);
+    });
+});
+
 it('records a successful delivery row with HMAC signature on 2xx response', function () {
     Http::fake([
         'hook.example.test/*' => Http::response('OK', 200),
@@ -54,6 +70,7 @@ it('records a successful delivery row with HMAC signature on 2xx response', func
     $product = aProduct();
 
     $payload = [
+        'version' => 'v1',
         'event' => 'product.updated',
         'product_id' => (int) $product->id,
         'sku' => $product->sku,
@@ -73,14 +90,26 @@ it('records a successful delivery row with HMAC signature on 2xx response', func
         ->and($delivery->succeeded_at)->not->toBeNull()
         ->and($delivery->next_retry_at)->toBeNull();
 
-    $expectedBody = json_encode($payload, JSON_UNESCAPED_SLASHES);
-    $expectedSig = hash_hmac('sha256', $expectedBody, 'super-secret-signing-key');
+    Http::assertSent(function ($request) use ($payload) {
+        if (! $request->hasHeader('X-Bagisto-Event', 'product.updated')) {
+            return false;
+        }
+        if (! $request->hasHeader('X-Bagisto-Timestamp') || ! $request->hasHeader('X-Bagisto-Signature')) {
+            return false;
+        }
 
-    expect($delivery->signature)->toBe($expectedSig);
+        $timestamp = $request->header('X-Bagisto-Timestamp')[0];
+        $sigHeader = $request->header('X-Bagisto-Signature')[0];
 
-    Http::assertSent(function ($request) use ($expectedSig) {
-        return $request->hasHeader('X-Bagisto-Signature', 'sha256='.$expectedSig)
-            && $request->hasHeader('X-Bagisto-Event', 'product.updated');
+        // Recompute the signature against "{timestamp}.{body}" to confirm the
+        // dispatcher binds the timestamp into the HMAC (replay protection).
+        $expected = 'sha256='.hash_hmac(
+            'sha256',
+            $timestamp.'.'.json_encode($payload, JSON_UNESCAPED_SLASHES),
+            'super-secret-signing-key',
+        );
+
+        return hash_equals($expected, $sigHeader);
     });
 });
 

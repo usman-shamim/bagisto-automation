@@ -49,7 +49,13 @@ class DispatchWebhook implements ShouldQueue
 
         $attempt = $delivery ? $delivery->attempt + 1 : 1;
         $body = json_encode($this->payload, JSON_UNESCAPED_SLASHES);
-        $signature = hash_hmac('sha256', $body, $webhook->secret);
+
+        // Signed string is "{timestamp}.{body}" so receivers can reject stale captures.
+        // Receivers MUST verify |now - timestamp| < SKEW_SECONDS (5 min) before
+        // trusting the signature, otherwise an attacker who recorded one delivery
+        // could replay it indefinitely.
+        $timestamp = (string) now()->getTimestamp();
+        $signature = hash_hmac('sha256', $timestamp.'.'.$body, $webhook->secret);
 
         if (! $delivery) {
             $delivery = AutomationWebhookDeliveryProxy::modelClass()::create([
@@ -70,6 +76,7 @@ class DispatchWebhook implements ShouldQueue
             $response = Http::withHeaders([
                 'Content-Type' => 'application/json',
                 'X-Bagisto-Signature' => 'sha256='.$signature,
+                'X-Bagisto-Timestamp' => $timestamp,
                 'X-Bagisto-Event' => $this->event,
                 'X-Bagisto-Delivery' => (string) $delivery->id,
             ])

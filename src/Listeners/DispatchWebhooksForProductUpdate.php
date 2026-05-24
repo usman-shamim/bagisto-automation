@@ -9,6 +9,12 @@ class DispatchWebhooksForProductUpdate
 {
     public const EVENT_NAME = 'product.updated';
 
+    /**
+     * Payload version. Bump on any breaking change to the keys/types below so
+     * receivers can detect schema drift without parsing.
+     */
+    public const PAYLOAD_VERSION = 'v1';
+
     public function handle(mixed $product): void
     {
         if (! $product || ! isset($product->id)) {
@@ -27,6 +33,7 @@ class DispatchWebhooksForProductUpdate
         $product->loadMissing('inventories');
 
         $payload = [
+            'version' => self::PAYLOAD_VERSION,
             'event' => self::EVENT_NAME,
             'product_id' => (int) $product->id,
             'sku' => $product->sku ?? null,

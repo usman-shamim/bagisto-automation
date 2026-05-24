@@ -187,7 +187,8 @@ Body:
   "proposed_price": 1399.0,
   "proposed_stock": 38,
   "flags": ["price_drop_8pct"],
-  "confidence": 0.92
+  "confidence": 0.92,
+  "external_request_id": "agent-run-2026-05-24-abc123"
 }
 ```
 
@@ -199,6 +200,24 @@ Body:
 | `proposed_stock` | int ≥ 0 | one-of | required if `proposed_price` is absent |
 | `flags` | array of strings ≤ 64 chars | no | free-form tags shown in admin filter |
 | `confidence` | number 0..1 | no | shown in admin list, sortable later |
+| `external_request_id` | string ≤ 128 chars | no | idempotency key, scoped to the calling token — see note below |
+
+**Idempotent retries.** Pass a stable `external_request_id` (any string you control —
+e.g. a workflow run id) and the API will deduplicate retries from the same token:
+the first call returns `201` with a new row, and any subsequent call with the same
+`(token, external_request_id)` returns `200` with the original row instead of creating
+a duplicate. The key is scoped per token, so two different tokens reusing the same
+value get independent rows.
+
+Two details worth knowing:
+
+- **Empty string is not a key.** `""` is normalized to "no idempotency key" so
+  multiple empty-string submissions don't collide on the unique index. Use a
+  real value or omit the field.
+- **Same key, different body, original wins.** If a retry sends the same
+  `external_request_id` but a different `proposed_price` / `proposed_stock` /
+  `source_url`, the API returns the *original* row unchanged. Treat the
+  external_request_id as immutable; mint a new one if the proposal really changed.
 
 Response `201`:
 
@@ -243,6 +262,31 @@ The row is **not applied**. An admin must approve it via the admin UI for the un
 
 The pending-updates page lists rows with their proposed vs current values, the source URL, agent-set flags, and confidence. Filter by status, product id, or flag. **Approve** runs the change through `ProductRepository::update()` (price) and `ProductInventoryRepository::saveInventories()` (stock) — exactly the same paths the admin UI uses, so events fire and caches invalidate normally. **Reject** marks the row terminal with an optional review note.
 
+### Role permissions
+
+The package registers ACL nodes so admin roles with `permission_type = 'custom'`
+can grant access at the page or action level. Grant a role any of the parent
+keys to expose the corresponding admin page, then add the child keys to allow
+the destructive actions.
+
+| Key | Grants |
+|---|---|
+| `automation` | Top-level menu group (required to see anything else) |
+| `automation.pending-updates` | View the pending-updates list |
+| `automation.pending-updates.approve` | Approve a staged update |
+| `automation.pending-updates.reject` | Reject a staged update |
+| `automation.tokens` | View the tokens page |
+| `automation.tokens.create` | Mint new API tokens |
+| `automation.tokens.revoke` | Revoke API tokens |
+| `automation.webhooks` | View the webhooks page |
+| `automation.webhooks.create` | Register new outbound webhooks |
+| `automation.webhooks.toggle` | Enable / disable an existing webhook |
+| `automation.webhooks.delete` | Delete an existing webhook |
+| `automation.products-mappings` | Attach / detach competitor URLs on product edit pages |
+
+Roles with `permission_type = 'all'` get every node automatically — that's the
+default for the seeded super-admin.
+
 **Drift check on approve**: if the current price or stock has moved more than 10% since the row's snapshot was captured, the apply fails (`status=failed`, `error_message` populated). The product is not changed. Stage a fresh row to retry.
 
 A "Competitor mappings" panel is injected into each product's edit page (no core edits — via Bagisto's `bagisto.admin.catalog.product.edit.form.after` view-render event).
@@ -283,29 +327,58 @@ Headers:
 | Header | Value |
 |---|---|
 | `Content-Type` | `application/json` |
-| `X-Bagisto-Signature` | `sha256=<hex>` — HMAC-SHA256 of the raw body, using the webhook's secret |
+| `X-Bagisto-Signature` | `sha256=<hex>` — HMAC-SHA256 of `"{timestamp}.{raw body}"`, using the webhook's secret |
+| `X-Bagisto-Timestamp` | Unix timestamp (seconds) of dispatch. Receivers MUST reject if `\|now - timestamp\| > 300s` to block replays |
 | `X-Bagisto-Event` | the event name |
 | `X-Bagisto-Delivery` | the delivery row's id (useful in support tickets) |
+
+### Payload envelope
+
+All payloads carry a `version` string so receivers can detect schema drift without
+parsing. The current version is `"v1"`; it is bumped only on breaking changes to
+key names or value types. New optional keys do not bump the version.
+
+```json
+{
+  "version": "v1",
+  "event": "product.updated",
+  "product_id": 42,
+  "sku": "ABC-123",
+  "price": 4999.0,
+  "stock_total": 7,
+  "occurred_at": "2026-05-24T12:34:56+00:00"
+}
+```
 
 ### Verifying the signature (Node.js example)
 
 ```javascript
 const crypto = require('crypto');
 
-function verify(rawBody, signatureHeader, secret) {
+const SKEW_SECONDS = 300; // reject anything older than 5 minutes
+
+function verify(rawBody, signatureHeader, timestampHeader, secret) {
+  // 1) Reject if the dispatch timestamp is missing, malformed, or stale.
+  const ts = parseInt(timestampHeader, 10);
+  if (!Number.isFinite(ts)) return false;
+  if (Math.abs(Math.floor(Date.now() / 1000) - ts) > SKEW_SECONDS) return false;
+
+  // 2) Recompute HMAC over "{timestamp}.{raw body}" — the timestamp is part
+  //    of the signed material, so an attacker can't reuse an old signature
+  //    with a fresh timestamp header.
   const expected = 'sha256=' + crypto
     .createHmac('sha256', secret)
-    .update(rawBody)
+    .update(`${ts}.${rawBody}`)
     .digest('hex');
 
-  // constant-time compare to avoid timing leaks
+  // 3) Constant-time compare to avoid timing leaks.
   const a = Buffer.from(signatureHeader);
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 ```
 
-In n8n: use a Webhook trigger node, set "Response Mode" to "Last Node", and add a Function node that runs the verify snippet against `items[0].headers['x-bagisto-signature']` and `items[0].body` before doing any work. Reject the request if `verify` returns false.
+In n8n: use a Webhook trigger node, set "Response Mode" to "Last Node", and add a Function node that runs the verify snippet against `items[0].headers['x-bagisto-signature']`, `items[0].headers['x-bagisto-timestamp']`, and `items[0].body` before doing any work. Reject the request if `verify` returns false.
 
 ### Retry and backoff
 
