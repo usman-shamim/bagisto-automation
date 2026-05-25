@@ -442,6 +442,13 @@ Writes to product price and stock always go through Bagisto's existing repositor
 
 ---
 
+## License
+
+This project is licensed under the [MIT License](LICENSE).  
+Copyright © 2026 Usman Shamim.
+
+---
+
 ## Non-goals
 
 Out of scope for this package:
